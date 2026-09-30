@@ -1,0 +1,61 @@
+{
+  "note_type": "",
+  "import_note_type": "",
+  "import_field_sets": [
+    {
+      "enabled": true,
+      "name": "Field Set 1",
+      "video": "",
+      "sentence": "",
+      "secondary": "",
+      "miscinfo": "",
+      "extras": {}
+    }
+  ],
+  "clip_identity": [
+    {"source": "sort_field"},
+    {"source": "video_filename"}
+  ],
+  "import_note_identity": [
+    {"source": "sort_field"},
+    {"source": "note_id"}
+  ],
+  "viewer_autoplay": true,
+  "field_sets": [
+    {
+      "enabled": true,
+      "name": "Field Set 1",
+      "video": "",
+      "sentence": "",
+      "secondary": "",
+      "miscinfo": "",
+      "extras": {}
+    }
+  ],
+  "generic_fields": [],
+  "audio_fields": [],
+  "clip_extra_roles": [],
+  "job_records_enabled": false,
+  "job_index_path": "",
+  "job_record_keys": {},
+  "job_record_trees": [],
+  "active_job_record_tree": "",
+  "anki_export_keys": {},
+  "path_privacy_mode": "off",
+  "path_privacy_parents": 1,
+  "mpv_executable": "mpv",
+  "library_folders": [],
+  "last_export_dir": "",
+  "export_mode": "fresh",
+  "export_exclusions_enabled": false,
+  "export_exclusions": [],
+  "export_exclusion_presets": [],
+  "import_mode": "match",
+  "conflict_mode": "silent",
+  "create_target_deck": "",
+  "import_signals": {},
+  "import_rules": [],
+  "import_copies": [],
+  "import_decks": [],
+  "import_minimum": "medium"
+}
