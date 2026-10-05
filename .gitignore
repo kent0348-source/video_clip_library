@@ -28,7 +28,7 @@ config.local.json
 secrets.json
 
 # Documentation
-ankiweb_readme.md
+# ankiweb_readme.md
 
 # Editor / IDE
 .vscode/
