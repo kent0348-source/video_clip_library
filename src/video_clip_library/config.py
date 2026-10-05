@@ -49,10 +49,19 @@ SIGNAL_LABELS = {
     "miscinfo_source": "Miscinfo source title",
 }
 
+DEFAULT_PATH_PRIVACY_MODE = "filename_only"
+PATH_PRIVACY_MODES = ("off", "filename_only", "keep_parents")
+
+
+def default_field_set_name(index: int) -> str:
+    number = index if index > 0 else 1
+    return f"Video clip {number}"
+
+
 DEFAULT_FIELD_SETS = [
     {
         "enabled": True,
-        "name": "Field Set 1",
+        "name": default_field_set_name(1),
         "video": "",
         "sentence": "",
         "secondary": "",
@@ -79,6 +88,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "import_mapping_initialized": False,
     "clip_identity": copy.deepcopy(DEFAULT_CLIP_IDENTITY),
     "import_note_identity": copy.deepcopy(DEFAULT_NOTE_IDENTITY),
+    "import_extra_roles": [],
     "import_note_profiles": {},
     "viewer_autoplay": True,
     "generic_fields": [],
@@ -90,7 +100,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "job_record_trees": [],
     "active_job_record_tree": "",
     "anki_export_keys": {},
-    "path_privacy_mode": "off",
+    "path_privacy_mode": DEFAULT_PATH_PRIVACY_MODE,
     "path_privacy_parents": 1,
     "mpv_executable": "mpv",
     "library_folders": [],
@@ -143,10 +153,37 @@ def _new_role_id(existing: set[str]) -> str:
         number += 1
 
 
+def roles_covering_field_sets(roles: Any, field_sets: Any) -> list[dict[str, str]]:
+    """Role list plus any extra-field ids already stored on the sets."""
+    normalized = normalize_clip_extra_roles(roles)
+    known = {role["id"] for role in normalized}
+    raw_sets = field_sets if isinstance(field_sets, list) else []
+    for source in raw_sets:
+        if not isinstance(source, dict):
+            continue
+        extras = source.get("extras") if isinstance(source.get("extras"), dict) else {}
+        for role_id in extras:
+            cleaned = _clean_role_id(str(role_id))
+            if not cleaned or cleaned in known or cleaned in FIELD_ROLES:
+                continue
+            known.add(cleaned)
+            number = 4 + len(normalized) + 1
+            normalized.append({"id": cleaned, "name": f"Field {number}"})
+    return normalized
+
+
+def import_role_ids(config: dict[str, Any]) -> list[str]:
+    return [
+        str(role.get("id") or "")
+        for role in config.get("import_extra_roles") or []
+        if isinstance(role, dict) and str(role.get("id") or "").strip()
+    ]
+
+
 def blank_field_set(index: int, role_ids: list[str] | None = None, *, enabled: bool | None = None) -> dict[str, Any]:
     return {
         "enabled": index == 0 if enabled is None else bool(enabled),
-        "name": f"Field Set {index}",
+        "name": default_field_set_name(index),
         "video": "",
         "sentence": "",
         "secondary": "",
@@ -206,7 +243,7 @@ def normalize_field_sets(value: Any, role_ids: list[str] | None = None) -> list[
         entry = {
             "enabled": bool(source.get("enabled", index == 0)),
             "index": indexes[index],
-            "name": str(source.get("name", "") or "").strip() or f"Field Set {index + 1}",
+            "name": str(source.get("name", "") or "").strip() or default_field_set_name(index + 1),
             "video": str(source.get("video", "") or "").strip(),
             "sentence": str(source.get("sentence", "") or "").strip(),
             "secondary": str(source.get("secondary", "") or "").strip(),
@@ -306,7 +343,7 @@ def field_sets_from_config(config: dict[str, Any]) -> list[FieldSet]:
         sets.append(
             FieldSet(
                 enabled=bool(raw.get("enabled")),
-                name=str(raw.get("name") or f"Field Set {position}"),
+                name=str(raw.get("name") or default_field_set_name(position)),
                 index=int(raw.get("index") or position),
                 video=str(raw.get("video") or ""),
                 sentence=str(raw.get("sentence") or ""),
@@ -330,16 +367,24 @@ def enabled_field_sets(config: dict[str, Any]) -> list[FieldSet]:
 
 def import_field_sets_from_config(config: dict[str, Any]) -> list[FieldSet]:
     sets: list[FieldSet] = []
-    for position, raw in enumerate(normalize_field_sets(config.get("import_field_sets", []), None), start=1):
+    role_ids = import_role_ids(config) if "import_extra_roles" in config else None
+    for position, raw in enumerate(normalize_field_sets(config.get("import_field_sets", []), role_ids), start=1):
         sets.append(
             FieldSet(
                 enabled=bool(raw.get("enabled")),
-                name=str(raw.get("name") or f"Field Set {position}"),
+                name=str(raw.get("name") or default_field_set_name(position)),
                 index=int(raw.get("index") or position),
                 video=str(raw.get("video") or ""),
                 sentence=str(raw.get("sentence") or ""),
                 secondary=str(raw.get("secondary") or ""),
                 miscinfo=str(raw.get("miscinfo") or ""),
+                extras={
+                    str(role_id): str(name or "")
+                    for role_id, name in (raw.get("extras") or {}).items()
+                    if str(role_id).strip()
+                }
+                if isinstance(raw.get("extras"), dict)
+                else {},
             )
         )
     return sets
@@ -395,6 +440,13 @@ def used_field_names(config: dict[str, Any], *, except_role: tuple[int, str] | N
 IMPORT_POINT_LEVELS = ("high", "medium", "low")
 IMPORT_POINT_VALUES = {"high": 30.0, "medium": 20.0, "low": 10.0}
 IMPORT_COMPARES = ("exact", "contains")
+SORT_FIELD_ID = "sort_field"
+DEFAULT_IMPORT_RULE: dict[str, str] = {
+    "source": SORT_FIELD_ID,
+    "compare": "contains",
+    "target_field": SORT_FIELD_ID,
+    "points": "medium",
+}
 
 
 def import_point_value(level: str) -> float:
@@ -590,11 +642,14 @@ def normalize_import_note_profiles(value: Any) -> dict[str, dict[str, Any]]:
         note_type = str(name or "").strip()
         if not note_type or not isinstance(item, dict):
             continue
-        field_sets = normalize_field_sets(item.get("field_sets"), None)
+        extra_roles = roles_covering_field_sets(item.get("extra_roles"), item.get("field_sets"))
+        role_ids = [role["id"] for role in extra_roles]
+        field_sets = normalize_field_sets(item.get("field_sets"), role_ids)
         dedupe_field_names(field_sets)
         profiles[note_type] = {
             "field_sets": field_sets,
             "note_identity": normalize_identity(item.get("note_identity")),
+            "extra_roles": extra_roles,
         }
     return profiles
 
@@ -612,6 +667,7 @@ def remember_import_note_profile(config: dict[str, Any], note_type: str | None =
     profiles[name] = {
         "field_sets": field_sets,
         "note_identity": normalize_identity(config.get("import_note_identity")),
+        "extra_roles": copy.deepcopy(config.get("import_extra_roles") or []),
     }
 
 
@@ -629,9 +685,13 @@ def switch_import_note_type(config: dict[str, Any], new_type: str) -> dict[str, 
     if isinstance(saved, dict):
         config["import_field_sets"] = copy.deepcopy(saved.get("field_sets") or [blank_field_set(1)])
         config["import_note_identity"] = copy.deepcopy(saved.get("note_identity") or DEFAULT_NOTE_IDENTITY)
+        config["import_extra_roles"] = copy.deepcopy(saved.get("extra_roles") or [])
     else:
         config["import_field_sets"] = [blank_field_set(1)]
         config["import_note_identity"] = copy.deepcopy(DEFAULT_NOTE_IDENTITY)
+        config["import_extra_roles"] = []
+    config["import_extra_roles"] = roles_covering_field_sets(config.get("import_extra_roles"), config.get("import_field_sets"))
+    config["import_field_sets"] = normalize_field_sets(config["import_field_sets"], import_role_ids(config))
     dedupe_field_names(config["import_field_sets"])
     config["import_note_identity"] = normalize_identity(config["import_note_identity"])
     if new:
@@ -667,11 +727,17 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         merged["import_note_type"] = str(incoming.get("note_type") or "").strip()
         source_sets = incoming.get("field_sets")
         merged["import_field_sets"] = copy.deepcopy(source_sets) if isinstance(source_sets, list) and source_sets else copy.deepcopy(DEFAULT_FIELD_SETS)
+        if "import_extra_roles" not in incoming:
+            merged["import_extra_roles"] = copy.deepcopy(incoming.get("clip_extra_roles") or [])
         merged["import_mapping_initialized"] = True
     else:
         merged["import_note_type"] = str(merged.get("import_note_type") or "").strip()
         merged["import_mapping_initialized"] = bool(merged.get("import_mapping_initialized"))
-    merged["import_field_sets"] = normalize_field_sets(merged.get("import_field_sets", []), None)
+    merged["import_extra_roles"] = roles_covering_field_sets(
+        merged.get("import_extra_roles"),
+        merged.get("import_field_sets"),
+    )
+    merged["import_field_sets"] = normalize_field_sets(merged.get("import_field_sets", []), import_role_ids(merged))
     if "clip_identity" not in incoming:
         merged["clip_identity"] = copy.deepcopy(DEFAULT_CLIP_IDENTITY)
     else:
@@ -687,6 +753,7 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         merged["import_note_profiles"][active_import_type] = {
             "field_sets": copy.deepcopy(merged["import_field_sets"]),
             "note_identity": copy.deepcopy(merged["import_note_identity"]),
+            "extra_roles": copy.deepcopy(merged["import_extra_roles"]),
         }
     merged["viewer_autoplay"] = bool(merged.get("viewer_autoplay", True))
     merged["clip_extra_roles"] = normalize_clip_extra_roles(merged.get("clip_extra_roles", []))
@@ -703,9 +770,9 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     known_tree_ids = {str(tree.get("id") or "") for tree in merged["job_record_trees"]}
     merged["active_job_record_tree"] = active_tree_id if active_tree_id in known_tree_ids else ""
     merged["anki_export_keys"] = dict(merged.get("anki_export_keys") or {}) if isinstance(merged.get("anki_export_keys"), dict) else {}
-    mode = str(merged.get("path_privacy_mode", "off") or "off").strip()
-    if mode not in {"off", "filename_only", "keep_parents"}:
-        mode = "off"
+    mode = str(merged.get("path_privacy_mode", DEFAULT_PATH_PRIVACY_MODE) or DEFAULT_PATH_PRIVACY_MODE).strip()
+    if mode not in PATH_PRIVACY_MODES:
+        mode = DEFAULT_PATH_PRIVACY_MODE
     merged["path_privacy_mode"] = mode
     try:
         parents = int(merged.get("path_privacy_parents", 1))
@@ -724,7 +791,11 @@ def normalize_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     merged["conflict_mode"] = "silent"
     merged["create_target_deck"] = ""
     merged["import_signals"] = normalize_import_signals(merged.get("import_signals", {}))
+    rules_were_seeded = "import_rules_seeded" in incoming
     merged["import_rules"] = normalize_import_rules(merged.get("import_rules"))
+    if not rules_were_seeded and not merged["import_rules"]:
+        merged["import_rules"] = normalize_import_rules([DEFAULT_IMPORT_RULE])
+    merged["import_rules_seeded"] = True
     merged["import_copies"] = normalize_import_copies(merged.get("import_copies"))
     merged["import_decks"] = normalize_import_decks(merged.get("import_decks"))
     minimum = str(merged.get("import_minimum") or "medium").strip()

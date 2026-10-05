@@ -8,6 +8,8 @@ from pathlib import Path
 
 from video_clip_library.config import (
     active_job_tree,
+    blank_field_set,
+    enabled_import_field_sets,
     normalize_config,
     normalize_field_sets,
     switch_import_note_type,
@@ -42,11 +44,13 @@ from video_clip_library.export_keys import (
 )
 from video_clip_library.import_map import (
     apply_fields_to_note,
+    apply_import_decisions,
     attach_library_notes,
     clip_label,
     field_set_display_name,
     clip_search_fields,
     describe_writes,
+    import_action_label,
     insert_search_term,
     library_audio_fields,
     library_audio_paths,
@@ -69,12 +73,13 @@ from video_clip_library.job_index import (
     filter_record,
     prepare_job_payload,
 )
-from video_clip_library.models import DiscoveredClip, ExtraField, FieldSet, FieldValue, LinkInfo
+from video_clip_library.models import DiscoveredClip, ExtraField, FieldSet, FieldValue, ImportDecision, LinkInfo
 from video_clip_library.anki_scan import clips_from_note_values, group_deck_names
 from video_clip_library.textutil import (
     extract_audio_filenames,
     extract_miscinfo_source,
     extract_video_filename,
+    field_has_content,
     normalize_filename,
     obscure_path,
     obscure_paths_in_data,
@@ -101,6 +106,16 @@ class VideoParseTests(unittest.TestCase):
     def test_multiple_audio_references(self) -> None:
         html = '[sound:one.mp3]<audio src="two.ogg"></audio><audio controls><source src="three.wav"></audio>'
         self.assertEqual(extract_audio_filenames(html), ["one.mp3", "two.ogg", "three.wav"])
+
+    def test_field_content_ignores_editor_blanks(self) -> None:
+        self.assertFalse(field_has_content(""))
+        self.assertFalse(field_has_content("  \n"))
+        self.assertFalse(field_has_content("<br>"))
+        self.assertFalse(field_has_content("<div><br></div>"))
+        self.assertFalse(field_has_content("&nbsp;"))
+        self.assertTrue(field_has_content("kept"))
+        self.assertTrue(field_has_content('<video src="clip.flv"></video>'))
+        self.assertTrue(field_has_content('<img src="x.jpg">'))
 
 
 class FieldSetTests(unittest.TestCase):
@@ -135,6 +150,13 @@ class FieldSetTests(unittest.TestCase):
         normalized = normalize_field_sets([{"enabled": False, "video": "", "sentence": ""}])
         self.assertTrue(normalized[0]["enabled"])
         self.assertEqual(len(normalized), 1)
+
+    def test_new_field_sets_are_named_video_clips(self) -> None:
+        config = normalize_config({})
+        self.assertEqual(config["field_sets"][0]["name"], "Video clip 1")
+        self.assertEqual(config["import_field_sets"][0]["name"], "Video clip 1")
+        self.assertEqual(blank_field_set(2)["name"], "Video clip 2")
+        self.assertEqual(config["path_privacy_mode"], "filename_only")
 
     def test_extra_fields_are_unique(self) -> None:
         config = normalize_config(
@@ -414,6 +436,106 @@ class ImportScoreTests(unittest.TestCase):
         decisions = plan_imports(clips, notes, config)
         self.assertTrue(all(item.conflict_resolution == "no_slot" for item in decisions))
 
+    def test_populated_non_video_field_skips_the_whole_set(self) -> None:
+        clips = [self._clip("c1", "one"), self._clip("c2", "two")]
+        notes = [
+            {
+                "note_id": 5,
+                "deck_name": "target",
+                "fields": {
+                    "Video1": "<br>",
+                    "Sentence1": "already here",
+                    "Video2": "&nbsp;",
+                    "Sentence2": "",
+                    "Notes": "<div><br></div>",
+                },
+            }
+        ]
+        config = normalize_config(
+            {
+                "import_minimum": "low",
+                "import_rules": [
+                    {"source": "sentence", "compare": "contains", "target_field": "Expression", "points": "low"},
+                ],
+                "field_sets": [
+                    {"enabled": True, "name": "Slot 1", "video": "Video1", "sentence": "Sentence1", "extras": {"field_5": "Notes"}},
+                    {"enabled": True, "name": "Slot 2", "video": "Video2", "sentence": "Sentence2"},
+                ],
+            }
+        )
+        notes[0]["fields"]["Expression"] = "one two"
+        decisions = plan_imports(clips, notes, config)
+        self.assertEqual(decisions[0].target_field_set_index, 2)
+        self.assertEqual(decisions[0].action, "import")
+        self.assertEqual(decisions[1].conflict_resolution, "no_slot")
+        self.assertEqual(decisions[1].action, "skip")
+
+        notes[0]["fields"]["Sentence1"] = ""
+        notes[0]["fields"]["Notes"] = "extra kept"
+        notes[0]["fields"]["Video2"] = '<video src="also.mkv"></video>'
+        decisions = plan_imports(clips[:1], notes, config)
+        self.assertEqual(decisions[0].conflict_resolution, "no_slot")
+
+        notes[0]["fields"]["Notes"] = ""
+        notes[0]["fields"]["Video2"] = '<img src="x.jpg">'
+        decisions = plan_imports(clips[:1], notes, config)
+        self.assertEqual(decisions[0].target_field_set_index, 1)
+
+    def test_unmapped_role_does_not_block_a_field_set(self) -> None:
+        clip = self._clip()
+        notes = [
+            {
+                "note_id": 5,
+                "deck_name": "target",
+                "fields": {"Video": "", "Sentence": "leave this", "Expression": "hello"},
+            }
+        ]
+        config = normalize_config(
+            {
+                "import_minimum": "low",
+                "import_rules": [
+                    {"source": "sentence", "compare": "exact", "target_field": "Expression", "points": "low"},
+                ],
+                "field_sets": [{"enabled": True, "video": "Video", "sentence": ""}],
+            }
+        )
+        decisions = plan_imports([clip], notes, config)
+        self.assertEqual(decisions[0].action, "import")
+        self.assertEqual(decisions[0].target_field_set_index, 1)
+
+    def test_populated_import_copy_target_skips_the_clip(self) -> None:
+        clips = [self._clip("c1", "one"), self._clip("c2", "two")]
+        notes = [
+            {
+                "note_id": 5,
+                "deck_name": "target",
+                "fields": {"Video1": "", "Video2": "", "Notes": "already", "Expression": "one two"},
+            }
+        ]
+        config = normalize_config(
+            {
+                "import_minimum": "low",
+                "import_rules": [
+                    {"source": "sentence", "compare": "contains", "target_field": "Expression", "points": "low"},
+                ],
+                "import_copies": [{"source": "sentence", "target_field": "Notes"}],
+                "field_sets": [
+                    {"enabled": True, "name": "Slot 1", "video": "Video1"},
+                    {"enabled": True, "name": "Slot 2", "video": "Video2"},
+                ],
+            }
+        )
+        decisions = plan_imports(clips, notes, config)
+        self.assertTrue(all(item.action == "skip" for item in decisions))
+        self.assertTrue(all(item.conflict_resolution == "occupied_copy" for item in decisions))
+
+        notes[0]["fields"]["Notes"] = "<br>"
+        decisions = plan_imports(clips, notes, config)
+        self.assertEqual(decisions[0].action, "import")
+        self.assertEqual(decisions[0].target_field_set_index, 1)
+        self.assertEqual(decisions[1].conflict_resolution, "occupied_copy")
+        self.assertEqual(decisions[1].action, "skip")
+
     def test_optional_fields_are_not_written_when_unmapped(self) -> None:
         clip = self._clip()
         note = {"Video": "old", "Sentence": "keep", "Notes": "keep"}
@@ -424,6 +546,17 @@ class ImportScoreTests(unittest.TestCase):
         self.assertEqual(note["Sentence"], "keep")
         self.assertEqual(note["Notes"], "keep")
         self.assertEqual(describe_writes(field_set), "Video")
+
+    def test_import_extra_role_is_written_from_the_clip_field(self) -> None:
+        clip = self._clip()
+        clip["anki"]["fields"]["field_5"] = {"name": "Notes", "value": "from-clip"}
+        note = {"Video": "old", "Sentence": "keep", "Notes": "keep"}
+        field_set = FieldSet(video="Video", sentence="Sentence", extras={"field_5": "Notes"})
+        updated = apply_fields_to_note(note, field_set, clip, "c1.mkv")
+        self.assertEqual(updated, ["Video", "Sentence", "Notes"])
+        self.assertEqual(note["Notes"], "from-clip")
+        self.assertEqual(note["Sentence"], "hello")
+        self.assertEqual(describe_writes(field_set), "Video, Sentence, Notes")
 
     def test_exact_match_skips_unrelated_notes(self) -> None:
         clip = self._clip()
@@ -514,7 +647,7 @@ class ImportScoreTests(unittest.TestCase):
             {
                 "import_minimum": "high",
                 "import_rules": [],
-                "field_sets": [{"enabled": True, "video": "Video", "sentence": "Expression"}],
+                "field_sets": [{"enabled": True, "video": "Video", "sentence": "Sentence"}],
             }
         )
         decisions = plan_imports([clip], notes, config, overrides={"c1": 2})
@@ -571,6 +704,185 @@ class ImportScoreTests(unittest.TestCase):
         replaced, cursor = insert_search_term("keep replace tail", '"term"', 5, 5, 12)
         self.assertEqual(replaced, 'keep "term" tail')
         self.assertEqual(cursor, len('keep "term"'))
+
+    def test_source_catalog_includes_sort_field_only_when_the_key_exists(self) -> None:
+        empty = {"anki": {"sort_field_value": ""}}
+        self.assertEqual(dict(source_catalog([empty])).get("sort_field"), "Sort field text")
+        joined = attach_library_notes({"anki": {"note_id": 3}}, {"3": {"sort_field_value": ""}})
+        self.assertIn("sort_field", dict(source_catalog([joined])))
+        missing = {"anki": {"fields": {"sentence": {"name": "s", "value": "hello"}}}}
+        self.assertNotIn("sort_field", dict(source_catalog([missing])))
+
+    def test_sort_field_target_token_matches_sort_value_not_a_same_named_field(self) -> None:
+        clip = self._clip()
+        notes = [
+            {
+                "note_id": 1,
+                "sort_field_name": "Expression",
+                "sort_field_value": "皮肉",
+                "fields": {"Expression": "different", "Video": ""},
+            },
+            {
+                "note_id": 2,
+                "sort_field_name": "Expression",
+                "sort_field_value": "other",
+                "fields": {"Expression": "皮肉", "Video": ""},
+            },
+        ]
+        config = normalize_config(
+            {
+                "import_rules_seeded": True,
+                "import_minimum": "medium",
+                "import_rules": [
+                    {"source": "sort_field", "compare": "contains", "target_field": "sort_field", "points": "medium"},
+                ],
+                "field_sets": [{"enabled": True, "video": "Video"}],
+            }
+        )
+        decisions = plan_imports([clip], notes, config)
+        self.assertEqual(decisions[0].note_id, 1)
+        self.assertEqual(decisions[0].action, "import")
+
+    def test_default_import_rule_is_seeded_once_and_can_be_deleted(self) -> None:
+        seeded = normalize_config({})
+        self.assertTrue(seeded["import_rules_seeded"])
+        self.assertEqual(
+            seeded["import_rules"],
+            [{"source": "sort_field", "compare": "contains", "target_field": "sort_field", "points": "medium"}],
+        )
+        deleted = normalize_config({"import_rules_seeded": True, "import_rules": []})
+        self.assertEqual(deleted["import_rules"], [])
+        kept = normalize_config(
+            {"import_rules": [{"source": "sentence", "compare": "exact", "target_field": "Sentence", "points": "low"}]}
+        )
+        self.assertEqual(kept["import_rules"][0]["source"], "sentence")
+        self.assertEqual(len(kept["import_rules"]), 1)
+        self.assertTrue(kept["import_rules_seeded"])
+
+    def test_forced_import_overwrites_a_populated_field_set(self) -> None:
+        clip = self._clip()
+        notes = [
+            {
+                "note_id": 5,
+                "deck_name": "target",
+                "fields": {"Video": '<video src="already.mkv"></video>', "Expression": "hello"},
+            }
+        ]
+        config = normalize_config(
+            {
+                "import_rules_seeded": True,
+                "import_minimum": "low",
+                "import_rules": [
+                    {"source": "sentence", "compare": "exact", "target_field": "Expression", "points": "low"},
+                ],
+                "field_sets": [{"enabled": True, "video": "Video"}],
+            }
+        )
+        skipped = plan_imports([clip], notes, config)
+        self.assertEqual(skipped[0].action, "skip")
+        self.assertEqual(skipped[0].conflict_resolution, "no_slot")
+        self.assertEqual(import_action_label(skipped[0]), "Import (overwrite)")
+        forced = plan_imports([clip], notes, config, overwrite_ids={"c1"})
+        self.assertEqual(forced[0].action, "import")
+        self.assertTrue(forced[0].overwrite)
+        self.assertEqual(forced[0].target_field_set_index, 1)
+        self.assertEqual(import_action_label(forced[0]), "Import (overwrite)")
+
+        second = self._clip("c2", "hello")
+        both = plan_imports([clip, second], notes, config, overwrite_ids={"c1", "c2"})
+        self.assertEqual(both[0].action, "import")
+        self.assertEqual(both[1].action, "skip")
+        self.assertFalse(both[1].overwrite)
+
+    def test_sort_field_copy_writes_the_resolved_sort_field(self) -> None:
+        clip = self._clip()
+        note = {"Expression": "old", "Video": "", "sort_field_name": "Expression"}
+        updated = apply_fields_to_note(
+            note,
+            FieldSet(video="Video"),
+            clip,
+            "c1.mkv",
+            copies=[{"source": "sentence", "target_field": "sort_field"}],
+        )
+        self.assertEqual(note["Expression"], "hello")
+        self.assertIn("Expression", updated)
+        unresolved = {"Expression": "old", "Video": ""}
+        apply_fields_to_note(
+            unresolved,
+            FieldSet(video="Video"),
+            clip,
+            "c1.mkv",
+            copies=[{"source": "sentence", "target_field": "sort_field"}],
+        )
+        self.assertEqual(unresolved["Expression"], "old")
+
+    def test_apply_honors_manual_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            library = Path(folder) / "library"
+            media = library / "media"
+            media.mkdir(parents=True)
+            (media / "c1.mkv").write_bytes(b"video")
+            collection_media = Path(folder) / "anki-media"
+            collection_media.mkdir()
+
+            class LiveNote(dict):
+                id = 5
+
+            live = LiveNote(Video='<video src="old.mkv"></video>')
+
+            class MediaFolder:
+                def dir(self) -> str:
+                    return str(collection_media)
+
+            class Collection:
+                media = MediaFolder()
+
+                def get_note(self, note_id: int) -> LiveNote:
+                    self.requested = note_id
+                    return live
+
+                def update_note(self, note: LiveNote) -> None:
+                    self.updated = note
+
+                def save(self) -> None:
+                    self.saved = True
+
+            collection = Collection()
+            clip = self._clip()
+            config = normalize_config(
+                {
+                    "import_rules_seeded": True,
+                    "import_rules": [],
+                    "field_sets": [{"enabled": True, "video": "Video"}],
+                }
+            )
+            decision = ImportDecision(
+                clip_id="c1",
+                mode="match",
+                action="import",
+                note_id=5,
+                target_field_set_index=1,
+                overwrite=False,
+            )
+            blocked = apply_import_decisions(
+                clips_by_id={"c1": clip},
+                decisions=[decision],
+                config=config,
+                library_root=str(library),
+                collection=collection,
+            )
+            self.assertEqual(blocked["updated"], 0)
+            self.assertEqual(blocked["skipped"], 1)
+            decision.overwrite = True
+            written = apply_import_decisions(
+                clips_by_id={"c1": clip},
+                decisions=[decision],
+                config=config,
+                library_root=str(library),
+                collection=collection,
+            )
+            self.assertEqual(written["updated"], 1)
+            self.assertIn("c1.mkv", live["Video"])
 
 
 class JobTreeTests(unittest.TestCase):
@@ -1227,6 +1539,8 @@ class IdentityAndImportSplitTests(unittest.TestCase):
         self.assertIn("miscinfo", choices)
         self.assertIn("clip_number", choices)
         self.assertNotIn("sort_field", choices)
+        present = clip_identity_choices([{"anki": {"sort_field_value": ""}}])
+        self.assertIn("sort_field", [source for source, _label in present])
 
     def test_note_identity_defaults_to_sort_field_and_note_id(self) -> None:
         note = {
@@ -1365,6 +1679,41 @@ class SampleAndProfileTests(unittest.TestCase):
         self.assertEqual(config["import_field_sets"][1]["video"], "Other")
         self.assertEqual(config["import_field_sets"][1]["sentence"], "")
         self.assertEqual(visible_field_choices(["Video", "Other", "Sentence"], {"video"}, "Other"), ["Other", "Sentence"])
+
+    def test_import_extra_roles_follow_the_note_type(self) -> None:
+        config = normalize_config(
+            {
+                "import_mapping_initialized": True,
+                "import_note_type": "A",
+                "import_extra_roles": [{"id": "field_5", "name": "Notes"}],
+                "import_field_sets": [
+                    {"enabled": True, "video": "VideoA", "extras": {"field_5": "NotesA"}},
+                    {"enabled": True, "video": "VideoB", "extras": {"field_5": "NotesB"}},
+                ],
+            }
+        )
+        self.assertEqual(config["import_extra_roles"][0]["name"], "Notes")
+        self.assertEqual(config["import_field_sets"][0]["extras"]["field_5"], "NotesA")
+        self.assertEqual(config["import_field_sets"][1]["extras"]["field_5"], "NotesB")
+        loaded = enabled_import_field_sets(config)
+        self.assertEqual(loaded[0].extra_map()["field_5"], "NotesA")
+        self.assertEqual(loaded[1].extra_map()["field_5"], "NotesB")
+        switch_import_note_type(config, "B")
+        self.assertEqual(config["import_extra_roles"], [])
+        self.assertEqual(config["import_field_sets"][0]["extras"], {})
+        self.assertEqual(config["import_note_profiles"]["A"]["extra_roles"][0]["id"], "field_5")
+        switch_import_note_type(config, "A")
+        self.assertEqual(config["import_extra_roles"][0]["name"], "Notes")
+        self.assertEqual(config["import_field_sets"][1]["extras"]["field_5"], "NotesB")
+        adopted = normalize_config(
+            {
+                "note_type": "Export",
+                "clip_extra_roles": [{"id": "field_5", "name": "Word list"}],
+                "field_sets": [{"enabled": True, "video": "ExportVideo", "extras": {"field_5": "Words"}}],
+            }
+        )
+        self.assertEqual(adopted["import_extra_roles"][0]["name"], "Word list")
+        self.assertEqual(adopted["import_field_sets"][0]["extras"]["field_5"], "Words")
 
     def test_export_key_examples_come_from_notes(self) -> None:
         notes = [

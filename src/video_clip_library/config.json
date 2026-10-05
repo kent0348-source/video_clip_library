@@ -4,7 +4,7 @@
   "import_field_sets": [
     {
       "enabled": true,
-      "name": "Field Set 1",
+      "name": "Video clip 1",
       "video": "",
       "sentence": "",
       "secondary": "",
@@ -20,11 +20,12 @@
     {"source": "sort_field"},
     {"source": "note_id"}
   ],
+  "import_extra_roles": [],
   "viewer_autoplay": true,
   "field_sets": [
     {
       "enabled": true,
-      "name": "Field Set 1",
+      "name": "Video clip 1",
       "video": "",
       "sentence": "",
       "secondary": "",
@@ -41,7 +42,7 @@
   "job_record_trees": [],
   "active_job_record_tree": "",
   "anki_export_keys": {},
-  "path_privacy_mode": "off",
+  "path_privacy_mode": "filename_only",
   "path_privacy_parents": 1,
   "mpv_executable": "mpv",
   "library_folders": [],

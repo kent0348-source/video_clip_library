@@ -27,6 +27,9 @@ user_files/
 config.local.json
 secrets.json
 
+# Documentation
+ankiweb_readme.md
+
 # Editor / IDE
 .vscode/
 .idea/

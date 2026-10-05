@@ -13,6 +13,7 @@ AUDIO_SRC_RE = re.compile(r"""<audio\b[^>]*\bsrc\s*=\s*["']([^"']+)["']""", re.I
 SOURCE_SRC_RE = re.compile(r"""<source\b[^>]*\bsrc\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 SOUND_RE = re.compile(r"\[sound:([^\]]+)\]", re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
+EMPTY_MARKUP_RE = re.compile(r"(?is)</?(?:br|div|p|span)\b[^>]*>|&nbsp;|&#160;|&#xa0;")
 TIME_RANGE_RE = re.compile(
     r"_(?P<start>(?:\d+h)?\d{2}m\d{2}s\d{3}ms)_(?P<end>(?:\d+h)?\d{2}m\d{2}s\d{3}ms)\.[^.]+$",
     re.IGNORECASE,
@@ -25,6 +26,15 @@ PATH_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 def strip_html(value: str) -> str:
     return html.unescape(TAG_RE.sub(" ", value or "")).strip()
+
+
+def field_has_content(value: str) -> bool:
+    """True when a note field has text or markup other than an editor blank."""
+    text = value or ""
+    if strip_html(text):
+        return True
+    cleaned = EMPTY_MARKUP_RE.sub("", text)
+    return bool(re.sub(r"\s+", "", cleaned))
 
 
 def normalize_text(value: str) -> str:

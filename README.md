@@ -11,7 +11,7 @@ Anki addon that exports video clips and their note/job metadata to a portable JS
 - Optionally merge clip-encode / mpvacious job records into `clip_library.json`.
 - Choose which clip-library keys to store, and which job-record keys to store from a tree built out of a deck's real job records.
 - Browse one or more exported libraries, search them, and play clips or linked note-audio files with embedded mpv.
-- Import into existing notes only. You build match rules with dropdowns, review the suggested note, and can change that note before writing. Each clip uses the first empty video slot. Sentence, secondary, and miscinfo can be set to Don't import.
+- Import into existing notes only. You build match rules with dropdowns, review the suggested note, and can change that note before writing. Each clip uses the first import field set whose mapped fields are all empty. Import copies are included in that check. If any field that would be written already has data, that destination is skipped and nothing in it is written. Sentence, secondary, miscinfo, and any extra rows can be set to Don't import.
 - Target decks are shown as a tree (`Parent` above `Parent::Child`). Checking a parent does not include its subdecks.
 - Import dropdowns list the best matches, not every note in the deck. Use the … button to search the rest. That stays responsive on collections with tens of thousands of notes.
 - The Anki console prints `[clip_library]` timings for building the mapping preview, exporting a collection, importing a collection, and building a job-record export key tree.
@@ -22,8 +22,8 @@ Anki addon that exports video clips and their note/job metadata to a portable JS
 ## Menus
 
 - `Tools > Clip Library > Configure` edits a draft. Save writes it. Close discards it, and asks first when something actually changed. The Exclusions tab edits export filter rules and named presets. Paths have to be typed there.
-- The Import note type tab remembers field sets and note identity per note type. The import window uses the same setup.
-- `Tools > Clip Library > Library Viewer`
+- The Import note type tab remembers field sets, extra rows on those sets, and note identity per note type. The import window uses the same setup.
+- `Tools > Clip Library > Library Viewer`. Add a library by choosing its `clip_library.json` file. The folder that contains that file is the library.
 - Browser `Edit > Clip Library: Export selected notes...`
 - Browser `Edit > Clip Library: Export deck...`
 
@@ -50,9 +50,3 @@ python -m pytest
 ```
 
 The tests cover pure export, import, configuration, identity, and path-handling logic. UI and Anki collection workflows still require a manual smoke test inside Anki.
-
-## Add-on packaging
-
-Anki add-on archives must contain the contents of `src/video_clip_library` at the archive root. Do not include the `src` directory, the `video_clip_library` directory wrapper, tests, this README, `meta.json`, `__pycache__`, or the reference material under `user_files`.
-
-Keep `config.json` and `manifest.json` in the archive. `meta.json` is generated and maintained by Anki for an installed add-on; it is not the source of default configuration.

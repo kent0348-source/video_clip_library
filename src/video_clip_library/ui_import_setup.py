@@ -22,9 +22,11 @@ from .anki_scan import list_model_fields, list_note_types
 from .config import (
     blank_field_set,
     dedupe_field_names,
+    default_field_set_name,
     remember_import_note_profile,
     switch_import_note_type,
 )
+from .models import FIELD_ROLES
 from .identity import (
     NOTE_SAMPLE_PLACEHOLDER,
     ensure_identity_choices,
@@ -73,7 +75,7 @@ class ImportNoteTypeEditor:
         layout.addLayout(form)
         layout.addWidget(self.note_preview)
         hint = QLabel(
-            "These field sets and the note identity are remembered for this note type. "
+            "These field sets, extra rows, and the note identity are remembered for this note type. "
             "Match rules, score, and target decks stay in the import window."
         )
         hint.setWordWrap(True)
@@ -94,14 +96,30 @@ class ImportNoteTypeEditor:
         for index, widgets in enumerate(self._widgets):
             entry: dict[str, Any] = {
                 "enabled": True if index == 0 else widgets["enabled"].isChecked(),
-                "name": widgets["name"].text().strip() or f"Field Set {index + 1}",
-                "extras": {},
+                "name": widgets["name"].text().strip() or default_field_set_name(index + 1),
+                "extras": {
+                    role_id: str(combo.currentData() or "")
+                    for role_id, combo in widgets.get("extra_combos", {}).items()
+                },
             }
             for role, combo in widgets["combos"].items():
                 entry[role] = str(combo.currentData() or "")
             sets.append(entry)
         dedupe_field_names(sets)
-        self.config["import_field_sets"] = sets or [blank_field_set(1)]
+        self.config["import_field_sets"] = sets or [blank_field_set(1, self._role_ids())]
+        if self._widgets:
+            roles: list[dict[str, str]] = []
+            names = self._widgets[0].get("extra_names", {})
+            for role in self.config.get("import_extra_roles") or []:
+                if not isinstance(role, dict):
+                    continue
+                role_id = str(role.get("id") or "")
+                if not role_id:
+                    continue
+                editor = names.get(role_id)
+                label = editor.text().strip() if editor is not None else str(role.get("name") or "")
+                roles.append({"id": role_id, "name": label or str(role.get("name") or role_id)})
+            self.config["import_extra_roles"] = roles
 
     def collect(self) -> None:
         self._collect_fields()
@@ -126,7 +144,10 @@ class ImportNoteTypeEditor:
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel("Import field sets"))
-        hint = QLabel("A field already chosen in this note type is hidden from the other dropdowns.")
+        hint = QLabel(
+            "A field already chosen in this note type is hidden from the other dropdowns. "
+            "The + on a field set adds another field to every set."
+        )
         hint.setWordWrap(True)
         layout.addWidget(hint)
         scroll = QScrollArea()
@@ -201,7 +222,7 @@ class ImportNoteTypeEditor:
         self._clear_sets()
         sets = list(self.config.get("import_field_sets") or [])
         if not sets:
-            sets = [blank_field_set(1)]
+            sets = [blank_field_set(1, self._role_ids())]
             self.config["import_field_sets"] = sets
         for index, field_set in enumerate(sets):
             self._add_set_row(index, field_set if isinstance(field_set, dict) else {})
@@ -209,15 +230,15 @@ class ImportNoteTypeEditor:
         self._refresh_field_combos()
 
     def _add_set_row(self, index: int, field_set: dict[str, Any]) -> None:
-        box = QGroupBox(str(field_set.get("name") or f"Field Set {index + 1}"))
+        box = QGroupBox(str(field_set.get("name") or default_field_set_name(index + 1)))
         grid = QGridLayout(box)
         enabled = QCheckBox("Enabled")
         enabled.setChecked(True if index == 0 else bool(field_set.get("enabled", True)))
         enabled.setEnabled(index > 0)
         enabled.toggled.connect(self._on_fields_changed)
-        name = QLineEdit(str(field_set.get("name") or f"Field Set {index + 1}"))
+        name = QLineEdit(str(field_set.get("name") or default_field_set_name(index + 1)))
         name.editingFinished.connect(self._on_fields_changed)
-        name.textChanged.connect(lambda text, group=box: group.setTitle(text or "Field set"))
+        name.textChanged.connect(lambda text, group=box, number=index + 1: group.setTitle(text or default_field_set_name(number)))
         grid.addWidget(enabled, 0, 0)
         grid.addWidget(name, 0, 1)
         if index > 0:
@@ -238,8 +259,44 @@ class ImportNoteTypeEditor:
             combos[role] = combo
             grid.addWidget(QLabel(label), row, 0)
             grid.addWidget(combo, row, 1, 1, 2)
+        extra_combos: dict[str, QComboBox] = {}
+        extra_names: dict[str, QLineEdit] = {}
+        extras = field_set.get("extras") if isinstance(field_set.get("extras"), dict) else {}
+        next_row = len(FIELD_ROLES) + 1
+        for offset, role in enumerate(self.config.get("import_extra_roles") or []):
+            if not isinstance(role, dict):
+                continue
+            role_id = str(role.get("id") or "")
+            if not role_id:
+                continue
+            label = QLineEdit(str(role.get("name") or role_id))
+            label.editingFinished.connect(
+                lambda role_id=role_id, editor=label: self._on_import_role_renamed(role_id, editor.text())
+            )
+            combo = QComboBox()
+            combo.setProperty("savedField", str(extras.get(role_id) or ""))
+            combo.currentIndexChanged.connect(self._on_fields_changed)
+            remove_role = icon_button("minus", "Remove this field from every field set")
+            remove_role.clicked.connect(lambda _checked=False, role_id=role_id: self._remove_import_role(role_id))
+            row = next_row + offset
+            grid.addWidget(label, row, 0)
+            grid.addWidget(combo, row, 1)
+            grid.addWidget(remove_role, row, 2)
+            extra_names[role_id] = label
+            extra_combos[role_id] = combo
+        add_role = icon_button("plus", "Add a field to every field set")
+        add_role.clicked.connect(self._add_import_role)
+        grid.addWidget(add_role, next_row + len(extra_combos), 0)
         self.import_sets_layout.addWidget(box)
-        self._widgets.append({"enabled": enabled, "name": name, "combos": combos})
+        self._widgets.append(
+            {
+                "enabled": enabled,
+                "name": name,
+                "combos": combos,
+                "extra_combos": extra_combos,
+                "extra_names": extra_names,
+            }
+        )
 
     def _refresh_field_combos(self) -> None:
         fields = self.fields()
@@ -247,16 +304,25 @@ class ImportNoteTypeEditor:
         for index, field_set in enumerate(self.config.get("import_field_sets") or []):
             if not isinstance(field_set, dict):
                 continue
-            for role in ("video", "sentence", "secondary", "miscinfo"):
+            for role in FIELD_ROLES:
                 name = str(field_set.get(role) or "")
                 if name:
                     selected[(index, role)] = name
+            extras = field_set.get("extras") if isinstance(field_set.get("extras"), dict) else {}
+            for role_id, name in extras.items():
+                cleaned = str(name or "")
+                if cleaned:
+                    selected[(index, str(role_id))] = cleaned
         if not selected:
             for index, widgets in enumerate(self._widgets):
                 for role, combo in widgets["combos"].items():
                     name = str(combo.currentData() or combo.property("savedField") or "")
                     if name:
                         selected[(index, role)] = name
+                for role_id, combo in widgets.get("extra_combos", {}).items():
+                    name = str(combo.currentData() or combo.property("savedField") or "")
+                    if name:
+                        selected[(index, role_id)] = name
         used = {name.casefold() for name in selected.values()}
         was_loading = self._loading
         self._loading = True
@@ -265,6 +331,10 @@ class ImportNoteTypeEditor:
                 current = selected.get((index, role), "")
                 empty = "(choose video field)" if role == "video" else "(don't write)"
                 fill_field_combo(combo, current, fields, used, empty)
+                combo.setProperty("savedField", "")
+            for role_id, combo in widgets.get("extra_combos", {}).items():
+                current = selected.get((index, role_id), "")
+                fill_field_combo(combo, current, fields, used, "(don't write)")
                 combo.setProperty("savedField", "")
         self._loading = was_loading
 
@@ -280,7 +350,7 @@ class ImportNoteTypeEditor:
             return
         self.collect()
         sets = list(self.config.get("import_field_sets") or [])
-        sets.append(blank_field_set(len(sets) + 1, enabled=True))
+        sets.append(blank_field_set(len(sets) + 1, self._role_ids(), enabled=True))
         self.config["import_field_sets"] = sets
         remember_import_note_profile(self.config)
         self._rebuild_field_sets()
@@ -293,7 +363,67 @@ class ImportNoteTypeEditor:
         sets = list(self.config.get("import_field_sets") or [])
         if index < len(sets):
             del sets[index]
-        self.config["import_field_sets"] = sets or [blank_field_set(1)]
+        self.config["import_field_sets"] = sets or [blank_field_set(1, self._role_ids())]
         remember_import_note_profile(self.config)
         self._rebuild_field_sets()
         self._on_changed()
+
+    def _role_ids(self) -> list[str]:
+        return [
+            str(role.get("id") or "")
+            for role in self.config.get("import_extra_roles") or []
+            if isinstance(role, dict) and role.get("id")
+        ]
+
+    def _add_import_role(self) -> None:
+        if self._loading:
+            return
+        self.collect()
+        roles = [role for role in self.config.get("import_extra_roles") or [] if isinstance(role, dict)]
+        existing = {str(role.get("id") or "") for role in roles}
+        number = 5
+        while f"field_{number}" in existing:
+            number += 1
+        role_id = f"field_{number}"
+        roles.append({"id": role_id, "name": f"Field {number}"})
+        self.config["import_extra_roles"] = roles
+        for field_set in self.config.get("import_field_sets") or []:
+            if not isinstance(field_set, dict):
+                continue
+            extras = dict(field_set.get("extras") or {})
+            extras.setdefault(role_id, "")
+            field_set["extras"] = extras
+        remember_import_note_profile(self.config)
+        self._rebuild_field_sets()
+        self._on_changed()
+
+    def _remove_import_role(self, role_id: str) -> None:
+        if self._loading:
+            return
+        self.collect()
+        self.config["import_extra_roles"] = [
+            role
+            for role in self.config.get("import_extra_roles") or []
+            if str(role.get("id") or "") != role_id
+        ]
+        for field_set in self.config.get("import_field_sets") or []:
+            if not isinstance(field_set, dict):
+                continue
+            extras = dict(field_set.get("extras") or {})
+            extras.pop(role_id, None)
+            field_set["extras"] = extras
+        remember_import_note_profile(self.config)
+        self._rebuild_field_sets()
+        self._on_changed()
+
+    def _on_import_role_renamed(self, role_id: str, text: str) -> None:
+        if self._loading:
+            return
+        cleaned = text.strip()
+        for widgets in self._widgets:
+            editor = widgets.get("extra_names", {}).get(role_id)
+            if editor is not None and editor.text() != cleaned:
+                editor.blockSignals(True)
+                editor.setText(cleaned)
+                editor.blockSignals(False)
+        self._on_fields_changed()

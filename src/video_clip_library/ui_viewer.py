@@ -61,6 +61,7 @@ class LibraryViewer(QDialog):
         layout = QVBoxLayout(self)
         toolbar = QHBoxLayout()
         add_button = QPushButton("Add library")
+        add_button.setToolTip("Choose a clip_library.json file. The folder that contains it is added as a library.")
         add_button.clicked.connect(self._add_library)
         remove_button = QPushButton("Remove library")
         remove_button.clicked.connect(self._remove_library)
@@ -216,7 +217,10 @@ class LibraryViewer(QDialog):
             if str(clip.get("id") or "") == current_id:
                 restore = item
         self.list.blockSignals(False)
-        self.status.setText(f"{len(self.clips)} clips")
+        if not self.libraries:
+            self.status.setText("No libraries yet. Add a library by choosing its clip_library.json.")
+        else:
+            self.status.setText(f"{len(self.clips)} clips")
         if restore is not None:
             self.list.setCurrentItem(restore)
         elif self.list.count():
@@ -367,16 +371,21 @@ class LibraryViewer(QDialog):
             QMessageBox.warning(self, "Clip Library", f"Linked audio file was not found:\n{path}")
 
     def _add_library(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Choose exported library folder")
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            f"Choose {LIBRARY_FILENAME}",
+            "",
+            f"Clip library ({LIBRARY_FILENAME})",
+        )
         if not path:
             return
-        library_path = os.path.join(path, LIBRARY_FILENAME)
-        if not load_library(library_path):
-            QMessageBox.warning(self, "Clip Library", f"No {LIBRARY_FILENAME} was found in that folder.")
+        if not load_library(path):
+            QMessageBox.warning(self, "Clip Library", f"That file is not a clip library. Choose a {LIBRARY_FILENAME} file.")
             return
+        folder = os.path.dirname(path)
         folders = list(self.config.get("library_folders") or [])
-        if path not in folders:
-            folders.append(path)
+        if folder not in folders:
+            folders.append(folder)
         self.config["library_folders"] = folders
         self.config = save_config(self.config)
         self._reload_libraries()

@@ -25,7 +25,7 @@ RECORDS_DIRNAME = "records"
 @dataclass
 class FieldSet:
     enabled: bool = True
-    name: str = "Field Set"
+    name: str = "Video clip 1"
     index: int = 1
     video: str = ""
     sentence: str = ""
@@ -217,6 +217,7 @@ class ImportDecision:
     note_id: int | None = None
     target_field_set_index: int = 1
     conflict_resolution: str = ""
+    overwrite: bool = False
     score: float = 0.0
     signals: dict[str, float] = field(default_factory=dict)
     label: str = ""

@@ -5,13 +5,20 @@ import re
 import shutil
 from typing import Any, Callable
 
-from .config import enabled_import_field_sets, import_point_value, normalize_import_copies, normalize_import_rules
+from .config import (
+    SORT_FIELD_ID,
+    enabled_import_field_sets,
+    import_point_value,
+    normalize_import_copies,
+    normalize_import_rules,
+)
 from .models import MEDIA_DIRNAME, ImportCandidate, ImportDecision
 from .textutil import (
     extract_audio_filenames,
     extract_clip_times_from_filename,
     extract_miscinfo_source,
     extract_video_filename,
+    field_has_content,
     normalize_filename,
     normalize_text,
     strip_html,
@@ -310,6 +317,10 @@ def source_catalog(clips: list[dict[str, Any]]) -> list[tuple[str, str]]:
         found.append((source_id, label))
 
     for source_id, label in BASE_SOURCES:
+        if source_id == SORT_FIELD_ID:
+            if any("sort_field_value" in clip_anki(clip) for clip in clips):
+                add(source_id, label)
+            continue
         if any(clip_source_text(clip, source_id) for clip in clips):
             add(source_id, label)
     for clip in clips:
@@ -342,6 +353,8 @@ def source_catalog(clips: list[dict[str, Any]]) -> list[tuple[str, str]]:
 
 
 def _target_text(note: dict[str, Any], field_name: str) -> str:
+    if field_name == SORT_FIELD_ID:
+        return str(note.get("sort_field_value") or "")
     fields = note.get("fields") if isinstance(note.get("fields"), dict) else {}
     if field_name in fields:
         return str(fields.get(field_name) or "")
@@ -548,7 +561,125 @@ def rank_notes(clip: dict[str, Any], notes: list[dict[str, Any]], config: dict[s
     return ranked
 
 
-def first_empty_field_set(note_fields: dict[str, str], config: dict[str, Any], reserved: set[int] | None = None) -> tuple[int, str]:
+def designated_import_fields(field_set) -> list[str]:
+    used = field_set.used_fields() if hasattr(field_set, "used_fields") else []
+    names: list[str] = []
+    seen: set[str] = set()
+    for name in used:
+        cleaned = str(name or "").strip()
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        names.append(cleaned)
+    return names
+
+
+def import_copy_targets(config: dict[str, Any], note: dict[str, Any] | None = None) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    sort_name = str((note or {}).get("sort_field_name") or "").strip()
+    for item in normalize_import_copies(config.get("import_copies")):
+        cleaned = str(item.get("target_field") or "").strip()
+        if cleaned == SORT_FIELD_ID:
+            cleaned = sort_name
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        names.append(cleaned)
+    return names
+
+
+def resolved_note_field(note: Any, field_name: str) -> str:
+    """Map the sort-field token to the note's real sort field. Other names pass through."""
+    name = str(field_name or "").strip()
+    if name != SORT_FIELD_ID:
+        return name
+    if isinstance(note, dict):
+        return str(note.get("sort_field_name") or "").strip()
+    try:
+        from .anki_scan import _sort_field
+
+        resolved, _value = _sort_field(note)
+        return str(resolved or "").strip()
+    except Exception:
+        return ""
+
+
+def _field_blocked(name: str, note_fields: dict[str, str], blocked: set[str]) -> bool:
+    if name.casefold() in blocked:
+        return True
+    return field_has_content(str(note_fields.get(name) or ""))
+
+
+def _copy_targets_blocked(
+    note: dict[str, Any],
+    note_fields: dict[str, str],
+    config: dict[str, Any],
+    blocked: set[str],
+) -> bool:
+    for item in normalize_import_copies(config.get("import_copies")):
+        target = str(item.get("target_field") or "").strip()
+        if not target:
+            continue
+        if target == SORT_FIELD_ID:
+            name = str(note.get("sort_field_name") or "").strip()
+            if name:
+                if _field_blocked(name, note_fields, blocked):
+                    return True
+            elif field_has_content(str(note.get("sort_field_value") or "")):
+                return True
+            continue
+        if _field_blocked(target, note_fields, blocked):
+            return True
+    return False
+
+
+def import_destination_block(
+    note_fields: dict[str, str],
+    field_set,
+    config: dict[str, Any],
+    reserved_names: set[str] | None = None,
+    note: dict[str, Any] | None = None,
+) -> str:
+    """Why this destination cannot be written. Empty string means it is clear."""
+    blocked = {str(name).casefold() for name in (reserved_names or set())}
+    if _copy_targets_blocked(note or {}, note_fields, config, blocked):
+        return "occupied_copy"
+    if any(_field_blocked(name, note_fields, blocked) for name in designated_import_fields(field_set)):
+        return "no_slot"
+    return ""
+
+
+def first_empty_field_set(
+    note_fields: dict[str, str],
+    config: dict[str, Any],
+    reserved: set[int] | None = None,
+    reserved_names: set[str] | None = None,
+    note: dict[str, Any] | None = None,
+) -> tuple[int, str]:
+    taken = reserved or set()
+    field_sets = enabled_import_field_sets(config)
+    if not field_sets:
+        return 0, "none"
+    blocked = {str(name).casefold() for name in (reserved_names or set())}
+    if _copy_targets_blocked(note or {}, note_fields, config, blocked):
+        return 0, "occupied_copy"
+    for field_set in field_sets:
+        if field_set.index in taken:
+            continue
+        if any(_field_blocked(name, note_fields, blocked) for name in designated_import_fields(field_set)):
+            continue
+        return field_set.index, "first_empty"
+    return 0, "no_slot"
+
+
+def first_unreserved_field_set(
+    config: dict[str, Any],
+    reserved: set[int] | None = None,
+) -> tuple[int, str]:
+    """First enabled field set not already claimed in this batch, ignoring field contents."""
     taken = reserved or set()
     field_sets = enabled_import_field_sets(config)
     if not field_sets:
@@ -556,9 +687,7 @@ def first_empty_field_set(note_fields: dict[str, str], config: dict[str, Any], r
     for field_set in field_sets:
         if field_set.index in taken:
             continue
-        if extract_video_filename(str(note_fields.get(field_set.video) or "")):
-            continue
-        return field_set.index, "first_empty"
+        return field_set.index, "overwrite"
     return 0, "no_slot"
 
 
@@ -600,17 +729,42 @@ def copy_into_media(source_path: str, media_directory: str, filename: str) -> st
     return filename
 
 
+def mapped_write_fields(field_set) -> list[tuple[str, str]]:
+    """Optional role id and note field. Video is written separately."""
+    mapped: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    video_name = str(getattr(field_set, "video", "") or "").strip()
+    if video_name:
+        seen.add(video_name.casefold())
+    for role in ("sentence", "secondary", "miscinfo"):
+        name = str(getattr(field_set, role, "") or "").strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        mapped.append((role, name))
+    extra_map = getattr(field_set, "extra_map", None)
+    extras = extra_map() if callable(extra_map) else getattr(field_set, "extras", {})
+    if isinstance(extras, dict):
+        for role_id, name in extras.items():
+            role = str(role_id or "").strip()
+            cleaned = str(name or "").strip()
+            if not role or not cleaned or cleaned.casefold() in seen:
+                continue
+            seen.add(cleaned.casefold())
+            mapped.append((role, cleaned))
+    return mapped
+
+
 def describe_writes(field_set, copies: list[dict[str, str]] | None = None) -> str:
     parts: list[str] = []
     video_name = str(getattr(field_set, "video", "") or "")
     if video_name:
         parts.append(video_name)
-    for role in ("sentence", "secondary", "miscinfo"):
-        name = str(getattr(field_set, role, "") or "")
-        if name:
-            parts.append(name)
+    parts.extend(name for _role, name in mapped_write_fields(field_set))
     for item in copies or []:
         name = str(item.get("target_field") or "")
+        if name == SORT_FIELD_ID:
+            name = "Sort field"
         if name and name not in parts:
             parts.append(name)
     return ", ".join(parts)
@@ -638,9 +792,8 @@ def apply_fields_to_note(
     if video_name and video_name in note:
         note[video_name] = rewrite_video_html(clip_field_value(clip, "video"), media_filename)
         updated.append(video_name)
-    for role in ("sentence", "secondary", "miscinfo"):
-        field_name = str(getattr(field_set, role, "") or "")
-        if not field_name or field_name not in note:
+    for role, field_name in mapped_write_fields(field_set):
+        if not field_name or field_name not in note or field_name in updated:
             continue
         value = clip_field_value(clip, role)
         if not value:
@@ -648,8 +801,11 @@ def apply_fields_to_note(
         note[field_name] = value
         updated.append(field_name)
     for item in normalize_import_copies(copies):
-        field_name = str(item.get("target_field") or "")
+        requested = str(item.get("target_field") or "")
+        field_name = resolved_note_field(note, requested)
         source_id = str(item.get("source") or "")
+        if requested == SORT_FIELD_ID and not field_name:
+            continue
         if not field_name or field_name not in note:
             continue
         value = clip_source_text(clip, source_id)
@@ -777,6 +933,16 @@ def library_audio_paths(library_root: str, clip: dict[str, Any]) -> list[tuple[s
     return paths
 
 
+POPULATED_SKIP_REASONS = {"no_slot", "occupied_copy", "overwrite"}
+
+
+def import_action_label(decision: ImportDecision) -> str:
+    """Combo label. Populated-field skips can be switched to an overwrite import."""
+    if decision.overwrite or decision.conflict_resolution in POPULATED_SKIP_REASONS:
+        return "Import (overwrite)"
+    return "Import"
+
+
 def plan_imports(
     clips: list[dict[str, Any]],
     notes: list[dict[str, Any]],
@@ -784,9 +950,11 @@ def plan_imports(
     overrides: dict[str, int | None] | None = None,
     skipped_ids: set[str] | None = None,
     progress: Callable[[int, int], None] | None = None,
+    overwrite_ids: set[str] | None = None,
 ) -> list[ImportDecision]:
     chosen = overrides or {}
     skipped = set(skipped_ids or [])
+    forced_overwrite = set(overwrite_ids or [])
     minimum = import_point_value(str(config.get("import_minimum") or "medium"))
     notes_by_id = {int(note.get("note_id") or 0): note for note in notes}
     match_index = build_match_index(notes, config)
@@ -831,27 +999,49 @@ def plan_imports(
                 decision.conflict_resolution = "skip"
         decisions.append(decision)
 
+    field_sets_by_index = {field_set.index: field_set for field_set in enabled_import_field_sets(config)}
     reserved: dict[int, set[int]] = {}
-    for note_id, note in notes_by_id.items():
-        fields = note.get("fields") if isinstance(note.get("fields"), dict) else {}
-        taken: set[int] = set()
-        for field_set in enabled_import_field_sets(config):
-            if extract_video_filename(str(fields.get(field_set.video) or "")):
-                taken.add(field_set.index)
-        reserved[note_id] = taken
+    reserved_names: dict[int, set[str]] = {}
     for decision in decisions:
+        decision.overwrite = False
         if decision.action != "import" or not decision.note_id:
             decision.target_field_set_index = 0
             continue
-        fields = notes_by_id.get(int(decision.note_id), {}).get("fields") or {}
-        taken = reserved.setdefault(int(decision.note_id), set())
-        index, reason = first_empty_field_set(fields if isinstance(fields, dict) else {}, config, taken)
+        note_id = int(decision.note_id)
+        note = notes_by_id.get(note_id, {})
+        fields = note.get("fields") or {}
+        note_fields = fields if isinstance(fields, dict) else {}
+        taken = reserved.setdefault(note_id, set())
+        blocked_names = reserved_names.setdefault(note_id, set())
+        index, reason = first_empty_field_set(
+            note_fields,
+            config,
+            taken,
+            blocked_names,
+            note,
+        )
+        if index == 0 and decision.clip_id in forced_overwrite and reason in {"no_slot", "occupied_copy"}:
+            index, reason = first_unreserved_field_set(config, taken)
+            if index:
+                decision.overwrite = True
+                decision.action = "import"
+                decision.conflict_resolution = "overwrite"
+            else:
+                decision.action = "skip"
+                decision.target_field_set_index = 0
+                decision.conflict_resolution = reason or "no_slot"
+                continue
         decision.target_field_set_index = index
         if index == 0:
             decision.action = "skip"
             decision.conflict_resolution = reason or "no_slot"
-        else:
-            taken.add(index)
+            continue
+        taken.add(index)
+        field_set = field_sets_by_index.get(index)
+        if field_set is None:
+            continue
+        for name in designated_import_fields(field_set) + import_copy_targets(config, note):
+            blocked_names.add(name.casefold())
     return decisions
 
 
@@ -886,11 +1076,12 @@ def apply_import_decisions(
     skipped = 0
     conflicts = 0
     warnings: list[str] = []
+    op_changes = None
 
     for decision in decisions:
         if decision.action != "import" or not decision.note_id or not decision.target_field_set_index:
             skipped += 1
-            if decision.conflict_resolution == "no_slot":
+            if decision.conflict_resolution in {"no_slot", "occupied_copy"}:
                 conflicts += 1
             continue
         clip = clips_by_id.get(decision.clip_id)
@@ -907,6 +1098,28 @@ def apply_import_decisions(
         if field_set is None:
             skipped += 1
             warnings.append("No complete field set configured for import.")
+            continue
+        try:
+            note = collection.get_note(int(decision.note_id))
+        except Exception:
+            skipped += 1
+            warnings.append(f"Note {decision.note_id} was not found.")
+            continue
+        note_fields = {str(name): str(note[name]) for name in list(note.keys())}
+        sort_name = resolved_note_field(note, SORT_FIELD_ID)
+        block = import_destination_block(
+            note_fields,
+            field_set,
+            config,
+            note={"sort_field_name": sort_name, "sort_field_value": str(note[sort_name]) if sort_name and sort_name in note else ""},
+        )
+        if block and not decision.overwrite:
+            skipped += 1
+            conflicts += 1
+            if block == "occupied_copy":
+                warnings.append(f"Import copy target already has data on note {note.id}")
+            else:
+                warnings.append(f"Import field set already has data on note {note.id}")
             continue
         try:
             used_filename = copy_into_media(source_media, media_directory, clip_filename(clip) or os.path.basename(source_media))
@@ -928,20 +1141,10 @@ def apply_import_decisions(
             warnings.append(f"Could not copy media: {error}")
             continue
 
-        try:
-            note = collection.get_note(int(decision.note_id))
-        except Exception:
-            skipped += 1
-            warnings.append(f"Note {decision.note_id} was not found.")
-            continue
-        existing = extract_video_filename(str(note[field_set.video]) if field_set.video in note else "")
-        if existing:
-            skipped += 1
-            conflicts += 1
-            warnings.append(f"Video slot already filled on note {note.id}")
-            continue
+        if any(str(item.get("target_field") or "") == SORT_FIELD_ID and not sort_name for item in copies):
+            warnings.append(f"Sort field could not be resolved on note {note.id}")
         apply_fields_to_note(note, field_set, clip, used_filename, copies, renames)
-        collection.update_note(note)
+        op_changes = _merge_op_changes(op_changes, collection.update_note(note))
         updated += 1
 
     try:
@@ -954,7 +1157,35 @@ def apply_import_decisions(
         "skipped": skipped,
         "conflicts": conflicts,
         "warnings": warnings,
+        "op_changes": op_changes,
     }
+
+
+_OP_CHANGE_FIELDS = (
+    "card",
+    "note",
+    "deck",
+    "tag",
+    "notetype",
+    "config",
+    "deck_config",
+    "mtime",
+    "browser_table",
+    "browser_sidebar",
+    "note_text",
+    "study_queues",
+)
+
+
+def _merge_op_changes(current: Any, extra: Any) -> Any:
+    if extra is None:
+        return current
+    if current is None:
+        return extra
+    for name in _OP_CHANGE_FIELDS:
+        if getattr(extra, name, False):
+            setattr(current, name, True)
+    return current
 
 
 def clip_label(clip: dict[str, Any], identity: list[dict[str, str]] | None = None) -> str:

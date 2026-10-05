@@ -8,10 +8,10 @@ from .textutil import example_text
 
 ANKI_EXPORT_KEY_DEFAULTS: dict[str, bool] = {
     "anki": True,
-    "anki.profile": True,
+    "anki.profile": False,
     "anki.note_id": True,
-    "anki.deck_name": True,
-    "anki.model_name": True,
+    "anki.deck_name": False,
+    "anki.model_name": False,
     "anki.sort_field_name": True,
     "anki.sort_field_value": True,
     "anki.field_set_index": True,

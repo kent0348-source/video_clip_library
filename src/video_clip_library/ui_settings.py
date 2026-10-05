@@ -35,8 +35,10 @@ from aqt.qt import (
 from .anki_scan import find_deck_note_ids, list_model_fields, list_note_types, scan_note_ids
 from .debuglog import timed
 from .config import (
+    DEFAULT_PATH_PRIVACY_MODE,
     active_job_tree,
     blank_field_set,
+    default_field_set_name,
     load_config,
     normalize_config,
     save_config,
@@ -89,6 +91,7 @@ SETTINGS_OWNED_KEYS = (
     "mpv_executable",
     "import_note_type",
     "import_field_sets",
+    "import_extra_roles",
     "import_note_identity",
     "import_note_profiles",
     "import_mapping_initialized",
@@ -205,7 +208,7 @@ class SettingsDialog(QDialog):
         self.privacy_mode.addItem("Off", "off")
         self.privacy_mode.addItem("Filename only", "filename_only")
         self.privacy_mode.addItem("Keep parent folders", "keep_parents")
-        current_mode = str(self.config.get("path_privacy_mode") or "off")
+        current_mode = str(self.config.get("path_privacy_mode") or DEFAULT_PATH_PRIVACY_MODE)
         index = max(0, self.privacy_mode.findData(current_mode))
         self.privacy_mode.setCurrentIndex(index)
         self.privacy_mode.currentIndexChanged.connect(self._save_jobs)
@@ -357,7 +360,7 @@ class SettingsDialog(QDialog):
         hint = QLabel(
             "The note type on the Fields tab is the export note type for this profile. "
             "It is not used when viewing or importing a collection. "
-            "Import note type, field sets, and note identity can also be changed on the Import note type tab. "
+            "Import note type, field sets, extra rows, and note identity can also be changed on the Import note type tab. "
             "Match rules stay in the import window."
         )
         hint.setWordWrap(True)
@@ -393,13 +396,13 @@ class SettingsDialog(QDialog):
     def _make_field_set_row(self, index: int, field_set: dict[str, Any]) -> None:
         box = QGroupBox()
         grid = QGridLayout(box)
-        enabled = QCheckBox(str(field_set.get("name") or f"Field Set {index + 1}"))
+        enabled = QCheckBox(str(field_set.get("name") or default_field_set_name(index + 1)))
         enabled.setChecked(True if index == 0 else bool(field_set.get("enabled")))
         enabled.setEnabled(index > 0)
         enabled.toggled.connect(self._on_fields_changed)
-        name = QLineEdit(str(field_set.get("name") or f"Field Set {index + 1}"))
+        name = QLineEdit(str(field_set.get("name") or default_field_set_name(index + 1)))
         name.editingFinished.connect(self._on_fields_changed)
-        name.textChanged.connect(lambda text, box=enabled: box.setText(text or "Field set"))
+        name.textChanged.connect(lambda text, box=enabled, number=index + 1: box.setText(text or default_field_set_name(number)))
         grid.addWidget(enabled, 0, 0)
         grid.addWidget(name, 0, 1)
         if index > 0:
@@ -564,7 +567,7 @@ class SettingsDialog(QDialog):
         for index, widgets in enumerate(self.field_set_widgets):
             entry = {
                 "enabled": True if index == 0 else widgets["enabled"].isChecked(),
-                "name": widgets["name"].text().strip() or f"Field Set {index + 1}",
+                "name": widgets["name"].text().strip() or default_field_set_name(index + 1),
             }
             for role, combo in widgets["combos"].items():
                 entry[role] = str(combo.currentData() or "")
@@ -1160,7 +1163,7 @@ class SettingsDialog(QDialog):
             return
         self.config["job_records_enabled"] = self.job_enabled.isChecked()
         self.config["job_index_path"] = self.job_index_path.text().strip()
-        self.config["path_privacy_mode"] = str(self.privacy_mode.currentData() or "off")
+        self.config["path_privacy_mode"] = str(self.privacy_mode.currentData() or DEFAULT_PATH_PRIVACY_MODE)
         self.config["path_privacy_parents"] = int(self.privacy_parents.value())
         self._persist()
         self._apply_redundancy_colors()
@@ -1190,7 +1193,7 @@ class SettingsDialog(QDialog):
         if hasattr(self, "job_enabled"):
             self.config["job_records_enabled"] = self.job_enabled.isChecked()
             self.config["job_index_path"] = self.job_index_path.text().strip()
-            self.config["path_privacy_mode"] = str(self.privacy_mode.currentData() or "off")
+            self.config["path_privacy_mode"] = str(self.privacy_mode.currentData() or DEFAULT_PATH_PRIVACY_MODE)
             self.config["path_privacy_parents"] = int(self.privacy_parents.value())
         if hasattr(self, "exclusion_editor"):
             self.config["export_exclusions_enabled"] = self.exclusion_editor.is_enabled()

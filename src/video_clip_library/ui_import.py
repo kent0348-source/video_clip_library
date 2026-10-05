@@ -34,7 +34,7 @@ from aqt.operations import CollectionOp, QueryOp
 from aqt.utils import tooltip
 
 from .anki_scan import find_note_ids_for_query, list_deck_names, list_model_fields, snapshot_notes_of_type
-from .config import enabled_import_field_sets, load_config, save_config
+from .config import SORT_FIELD_ID, default_field_set_name, enabled_import_field_sets, load_config, save_config
 from .identity import (
     NOTE_SAMPLE_PLACEHOLDER,
     SAMPLE_PLACEHOLDER,
@@ -52,6 +52,7 @@ from .import_map import (
     clip_search_fields,
     describe_writes,
     insert_search_term,
+    import_action_label,
     plan_imports,
     search_term_for_field,
     source_catalog,
@@ -70,6 +71,29 @@ from .ui_common import (
 POINT_CHOICES = (("High", "high"), ("Medium", "medium"), ("Low", "low"))
 COMPARE_CHOICES = (("is exactly", "exact"), ("contains", "contains"))
 DONT_IMPORT = "Don't import"
+
+
+class _CollectionOpResult(dict):
+    """Dict summary that also satisfies CollectionOp's result.changes contract."""
+
+    changes: Any
+
+
+def _collection_op_result(summary: dict[str, Any]) -> _CollectionOpResult:
+    from anki.collection import OpChanges
+
+    changes = summary.get("op_changes")
+    if changes is None:
+        changes = OpChanges()
+        if summary.get("updated"):
+            changes.note = True
+            changes.note_text = True
+            changes.browser_table = True
+    result = _CollectionOpResult(
+        {key: value for key, value in summary.items() if key != "op_changes"}
+    )
+    result.changes = changes
+    return result
 
 
 def _full_cell_tooltip(text: str, extra: str = "") -> str:
@@ -347,6 +371,7 @@ class ImportDialog(QDialog):
         self.decisions: list[ImportDecision] = []
         self.overrides: dict[str, int | None] = {}
         self.skipped_ids: set[str] = set()
+        self.overwrite_ids: set[str] = set()
         self._loading = False
         self._busy = False
         self._replan_again = False
@@ -368,8 +393,11 @@ class ImportDialog(QDialog):
         intro = QLabel(
             "Choose the note type in this profile that should receive the clips. "
             "Rules guess which existing note receives each clip. "
-            "The clip goes into the first empty video slot of the import field sets. "
-            "Sentence, secondary, and miscinfo are written only when those slots name a field. "
+            "The clip goes into the first import field set whose mapped fields are all empty. "
+            "Import copies are written only when those target fields are empty too. "
+            "If any field that would be written already has data, that destination is skipped. "
+            "You can still choose Import (overwrite) when that skip is because a field already has data. "
+            "Sentence, secondary, miscinfo, and any extra rows are written only when those slots name a field. "
             "Nothing is written until you apply."
         )
         intro.setWordWrap(True)
@@ -414,7 +442,7 @@ class ImportDialog(QDialog):
         left_layout.addWidget(add_copy, alignment=Qt.AlignmentFlag.AlignLeft)
 
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Clip", "Target note", "Why", "Video slot", "Will write", "Action"])
+        self.table.setHorizontalHeaderLabels(["Clip", "Target note", "Why", "Field set", "Will write", "Action"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -537,8 +565,10 @@ class ImportDialog(QDialog):
         combo.clear()
         combo.addItem("(choose)", "")
         sources = list(self._sources())
-        if current and current not in {source_id for source_id, _label in sources}:
-            sources.append((current, current))
+        known = {source_id for source_id, _label in sources}
+        if current and current not in known:
+            label = "Sort field text" if current == SORT_FIELD_ID else current
+            sources.append((current, label))
         for source_id, label in sources:
             combo.addItem(label, source_id)
         found = combo.findData(current)
@@ -558,7 +588,10 @@ class ImportDialog(QDialog):
         combo.blockSignals(True)
         combo.clear()
         combo.addItem(DONT_IMPORT if allow_skip else "(choose field)", "")
+        combo.addItem("Sort field", SORT_FIELD_ID)
         for name in self._target_fields():
+            if name == SORT_FIELD_ID:
+                continue
             combo.addItem(name, name)
         if current:
             found = combo.findData(current)
@@ -760,6 +793,7 @@ class ImportDialog(QDialog):
                         overrides,
                         skipped_ids,
                         progress=progress,
+                        overwrite_ids=set(self.overwrite_ids),
                     )
                 return notes, decisions
 
@@ -809,11 +843,13 @@ class ImportDialog(QDialog):
     def _slot_label(self, decision: ImportDecision) -> str:
         if not decision.target_field_set_index:
             if decision.conflict_resolution == "no_slot":
-                return "no empty slot"
+                return "no empty field set"
+            if decision.conflict_resolution == "occupied_copy":
+                return "copy target already has data"
             return ""
         for field_set in enabled_import_field_sets(self.config):
             if field_set.index == decision.target_field_set_index:
-                return field_set.name or f"Field set {field_set.index}"
+                return field_set.name or default_field_set_name(field_set.index)
         return str(decision.target_field_set_index)
 
     def _fill_table(self, notes: list[dict[str, Any]]) -> None:
@@ -866,9 +902,12 @@ class ImportDialog(QDialog):
             self.table.setItem(row, 4, _text_item(writes))
             action = QComboBox()
             action.blockSignals(True)
-            action.addItem("Import", "import")
+            action.addItem(import_action_label(decision), "import")
             action.addItem("Skip", "skip")
-            can_import = bool(decision.note_id and decision.target_field_set_index)
+            can_import = bool(decision.note_id) and (
+                bool(decision.target_field_set_index)
+                or decision.conflict_resolution in {"no_slot", "occupied_copy"}
+            )
             action.setCurrentIndex(0 if decision.action == "import" and can_import else 1)
             action.blockSignals(False)
             action.currentIndexChanged.connect(
@@ -916,7 +955,9 @@ class ImportDialog(QDialog):
             self.table.selectRow(row)
         menu = QMenu(self.table)
         skip_action = menu.addAction("Skip")
-        import_action = menu.addAction("Import")
+        selected = [decision for decision in self.decisions if decision.clip_id in set(self._selected_clip_ids())]
+        import_label = "Import (overwrite)" if any(import_action_label(decision) == "Import (overwrite)" for decision in selected) else "Import"
+        import_action = menu.addAction(import_label)
         chosen = menu.exec(global_pos)
         if chosen is skip_action:
             self._set_selected_action("skip")
@@ -941,10 +982,7 @@ class ImportDialog(QDialog):
         if not clip_ids:
             return
         for clip_id in clip_ids:
-            if action == "skip":
-                self.skipped_ids.add(clip_id)
-            else:
-                self.skipped_ids.discard(clip_id)
+            self._remember_action(clip_id, action)
         self._queue_replan()
 
     def _set_note(self, clip_id: str, widget: QComboBox) -> None:
@@ -964,13 +1002,23 @@ class ImportDialog(QDialog):
         self.overrides[clip_id] = dialog.note_id
         self._queue_replan()
 
+    def _remember_action(self, clip_id: str, action: str) -> None:
+        if action == "skip":
+            self.skipped_ids.add(clip_id)
+            self.overwrite_ids.discard(clip_id)
+            return
+        self.skipped_ids.discard(clip_id)
+        decision = next((item for item in self.decisions if item.clip_id == clip_id), None)
+        if decision is not None and import_action_label(decision) == "Import (overwrite)":
+            self.overwrite_ids.add(clip_id)
+        else:
+            self.overwrite_ids.discard(clip_id)
+
     def _set_action(self, clip_id: str, widget: QComboBox) -> None:
         if self._loading:
             return
-        if str(widget.currentData() or "skip") == "skip":
-            self.skipped_ids.add(clip_id)
-        else:
-            self.skipped_ids.discard(clip_id)
+        chosen = "skip" if str(widget.currentData() or "skip") == "skip" else "import"
+        self._remember_action(clip_id, chosen)
         self._queue_replan()
 
     def _apply(self) -> None:
@@ -996,13 +1044,14 @@ class ImportDialog(QDialog):
 
         def operation(col):
             with timed("importing collection"):
-                return apply_import_decisions(
+                summary = apply_import_decisions(
                     clips_by_id={str(clip.get("id") or ""): clip for clip in self.clips},
                     decisions=decisions,
                     config=config,
                     library_root=library_root,
                     collection=col,
                 )
+            return _collection_op_result(summary)
 
         def success(result) -> None:
             self._busy = False
@@ -1023,4 +1072,4 @@ class ImportDialog(QDialog):
             self._busy = False
             QMessageBox.critical(self, "Clip Library", f"Clip library import failed: {error}")
 
-        CollectionOp(parent=mw, op=operation, success=success).failure(failure).with_progress().run_in_background()
+        CollectionOp(parent=mw, op=operation).success(success).failure(failure).run_in_background()

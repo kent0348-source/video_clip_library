@@ -6,7 +6,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .config import active_job_tree, enabled_extra_fields, enabled_field_sets
+from .config import DEFAULT_PATH_PRIVACY_MODE, active_job_tree, default_field_set_name, enabled_extra_fields, enabled_field_sets
 from .exclusions import (
     ExclusionMatch,
     active_exclusion_rules,
@@ -93,7 +93,7 @@ def empty_library(config: dict[str, Any], decks: list[str]) -> dict[str, Any]:
         "settings_snapshot": {
             "job_records_enabled": bool(config.get("job_records_enabled")),
             "path_privacy": {
-                "mode": config.get("path_privacy_mode", "off"),
+                "mode": config.get("path_privacy_mode", DEFAULT_PATH_PRIVACY_MODE),
                 "parents": int(config.get("path_privacy_parents", 1) or 1),
             },
         },
@@ -181,7 +181,7 @@ def _normalize_library_field_sets(raw: Any) -> list[dict[str, Any]]:
         sets.append(
             {
                 "index": index,
-                "name": str(item.get("name") or f"Field Set {index}"),
+                "name": str(item.get("name") or default_field_set_name(index)),
                 "video": str(item.get("video") or ""),
                 "sentence": str(item.get("sentence") or ""),
                 "secondary": str(item.get("secondary") or ""),
@@ -685,7 +685,7 @@ def export_clips(
                 job_payload = prepare_job_payload(
                     record,
                     selection=job_selection,
-                    privacy_mode=str(config.get("path_privacy_mode") or "off"),
+                    privacy_mode=str(config.get("path_privacy_mode") or DEFAULT_PATH_PRIVACY_MODE),
                     privacy_parents=int(config.get("path_privacy_parents") or 1),
                     strict=True,
                 )
