@@ -1,9 +1,11 @@
 # Video Clip Library
 
 Video Clip Library saves HTML-tag (`<video></video>`) embedded video clips on your Anki cards (embedded on a field, not card template basis) into a folder you can keep, browse, and use again later.
+
 [I use a custom fork of mpvacious to create video clips for anki notes](https://github.com/kent0348-source/mpv-anki-clips/)
 
-> Example of embedded video in a note's field.
+**Example of embedded video in a note's field.**
+
 ![Library Viewer](screenshots/field_html_example.png)
 
 ## Requirements
